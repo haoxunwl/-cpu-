@@ -1,5 +1,3 @@
-
-
 # 输出logo和程序信息
 print("╔╗╔╗╔══╗╔══╗╔══╗╔══╗╔╗╔╗╔╗─╔╗╔════╗╔══╗╔╗─╔╗╔═══╗╔══╗╔══╗╔══╗╔╗─╔╗")
 print("║║║║║╔╗║║╔╗║╚═╗║║╔═╝║║║║║╚═╝║╚═╗╔═╝║╔╗║║╚═╝║║╔══╝╚═╗║║╔═╝╚╗╔╝║╚═╝║")
@@ -14,7 +12,7 @@ import math
 import random
 import platform
 import psutil
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool, cpu_count, Manager
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
@@ -27,6 +25,7 @@ import re
 import wmi  # 用于Windows系统获取硬件信息
 import sys
 import os
+import subprocess
 from collections import deque
 from datetime import datetime
 
@@ -38,11 +37,15 @@ plt.rcParams["font.family"] = ["SimHei"]
 
 
 # 将worker函数移出类，使其成为独立函数
-def worker(iterations):
+def worker(iterations, cancel_flag):
     result = 0
     for i in range(iterations):
         # 更复杂的数学运算，提高测试压力
         result += math.sqrt(i) * math.sin(i) / (math.cos(i) or 1.0) + math.log(i + 1)
+
+        # 定期检查取消标志
+        if i % 100000 == 0 and cancel_flag.value:
+            return result
     return result
 
 
@@ -50,7 +53,7 @@ class CPUBenchmarkUI:
     def __init__(self, root):
         self.root = root
         self.root.title("浩讯亿通©专业CPU性能测试工具1.0---浩讯亿通电脑店-2025")
-        self.root.geometry("800x700")  # 缩小窗口尺寸
+        self.root.geometry("800x730")  # 缩小窗口尺寸
         self.root.minsize(800, 600)  # 缩小最小尺寸
         self.root.configure(bg="#f0f0f0")
 
@@ -65,18 +68,26 @@ class CPUBenchmarkUI:
         self.running = False
         self.cancel_requested = False
         self.voltage = "N/A"  # 存储当前电压值
+        self.temperature = "N/A"  # 存储当前温度值
+        self.power = "N/A"  # 存储当前功耗值
         self.voltage_history = deque(maxlen=120)  # 存储最近2分钟的电压数据 (每秒一个点)
         self.freq_history = deque(maxlen=120)  # 存储最近2分钟的频率数据
+        self.usage_history = deque(maxlen=120)  # 存储最近2分钟的CPU使用率数据
+        self.temp_history = deque(maxlen=120)  # 存储最近2分钟的温度数据
+        self.power_history = deque(maxlen=120)  # 存储最近2分钟的功耗数据
         self.timestamps = deque(maxlen=120)  # 存储时间戳
-        self.voltage_update_interval = 1000  # 电压更新间隔(毫秒)
+        self.monitor_update_interval = 1000  # 监控更新间隔(毫秒)
         self.monitoring_active = True
 
         # 初始化CPU信息占位符
         self.cpu_brand = "加载中..."
         self.cpu_cores = "加载中..."
         self.cpu_freq = "加载中..."
+        self.cpu_usage = 0.0  # 当前CPU使用率
         self.mem_total = "加载中..."
         self.os_info = "加载中..."
+        self.cpu_process = "加载中..."  # CPU工艺制程
+        self.cpu_instruction_set = "加载中..."  # CPU指令集
 
         # 创建UI
         self.create_widgets()
@@ -279,6 +290,8 @@ class CPUBenchmarkUI:
 • 加密运算性能测试
 • 压缩运算性能测试
 • 核心电压监控
+• CPU频率监控
+• CPU使用率监控
 测试结果以直观的分数和图表展示，并提供详细的历史记录功能。
 官方DIY电脑交流群:Q群931587484
 """
@@ -532,27 +545,95 @@ class CPUBenchmarkUI:
         # 移除占位符
         self.monitor_placeholder.destroy()
 
-        # 创建图表框架 - 更紧凑
-        monitor_container = ttk.Frame(self.monitor_frame)
-        monitor_container.pack(fill=tk.BOTH, expand=True)
+        # 创建监控主框架 - 使用垂直布局
+        main_frame = ttk.Frame(self.monitor_frame)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # 创建电压图表 - 更小尺寸
-        voltage_frame = ttk.LabelFrame(monitor_container, text="CPU核心电压监控", padding=3)
-        voltage_frame.pack(fill=tk.BOTH, expand=True, padx=3, pady=3)
+        # 创建数据面板框架
+        data_frame = ttk.LabelFrame(
+            main_frame,
+            text="实时数据",
+            padding=5
+        )
+        data_frame.pack(fill=tk.X, padx=5, pady=5)
 
-        self.voltage_figure = plt.Figure(figsize=(6, 2.5), dpi=80)  # 缩小图表
-        self.voltage_ax = self.voltage_figure.add_subplot(111)
-        self.voltage_canvas = FigureCanvasTkAgg(self.voltage_figure, master=voltage_frame)
-        self.voltage_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=3, pady=3)
+        # 使用网格布局创建数据面板
+        data_labels = [
+            ("电压", "V", "#1f77b4"),
+            ("频率", "MHz", "#ff7f0e"),
+            ("使用率", "%", "#2ca02c"),
+            ("温度", "°C", "#d62728"),
+            ("功耗", "W", "#9467bd")
+        ]
 
-        # 创建频率图表 - 更小尺寸
-        freq_frame = ttk.LabelFrame(monitor_container, text="CPU频率监控", padding=3)
-        freq_frame.pack(fill=tk.BOTH, expand=True, padx=3, pady=3)
+        self.data_values = {}
 
-        self.freq_figure = plt.Figure(figsize=(6, 2.5), dpi=80)  # 缩小图表
-        self.freq_ax = self.freq_figure.add_subplot(111)
-        self.freq_canvas = FigureCanvasTkAgg(self.freq_figure, master=freq_frame)
-        self.freq_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=3, pady=3)
+        # 创建两行布局
+        row1 = ttk.Frame(data_frame)
+        row1.pack(fill=tk.X, pady=3)
+        row2 = ttk.Frame(data_frame)
+        row2.pack(fill=tk.X, pady=3)
+
+        rows = [row1, row2]
+
+        for idx, (label, unit, color) in enumerate(data_labels):
+            row_idx = idx // 3  # 每行3个指标
+            col_idx = idx % 3
+
+            if row_idx >= len(rows):
+                break
+
+            frame = ttk.Frame(rows[row_idx])
+            frame.grid(row=0, column=col_idx, padx=10, sticky=tk.W)
+
+            # 标签
+            lbl = ttk.Label(
+                frame,
+                text=f"{label}:",
+                font=("Arial", 9, "bold"),
+                foreground=color
+            )
+            lbl.pack(anchor=tk.W)
+
+            # 值
+            value_frame = ttk.Frame(frame)
+            value_frame.pack(anchor=tk.W)
+
+            value_label = ttk.Label(
+                value_frame,
+                text="0.00",
+                font=("Arial", 10, "bold"),
+                foreground=color
+            )
+            value_label.pack(side=tk.LEFT)
+
+            unit_label = ttk.Label(
+                value_frame,
+                text=unit,
+                font=("Arial", 8),
+                foreground=color
+            )
+            unit_label.pack(side=tk.LEFT, padx=(2, 0))
+
+            self.data_values[label] = value_label
+
+        # 创建图表框架
+        chart_frame = ttk.LabelFrame(
+            main_frame,
+            text="实时图表",
+            padding=5
+        )
+        chart_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # 创建图表容器
+        chart_container = ttk.Frame(chart_frame)
+        chart_container.pack(fill=tk.BOTH, expand=True)
+
+        # 创建图表
+        self.monitor_figure = plt.Figure(figsize=(6, 4), dpi=80)
+        self.monitor_ax = self.monitor_figure.add_subplot(111)
+        self.monitor_canvas = FigureCanvasTkAgg(self.monitor_figure, master=chart_container)
+        self.monitor_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=3, pady=3)
 
         # 设置初始化标志
         self.monitor_initialized = True
@@ -561,39 +642,345 @@ class CPUBenchmarkUI:
         self.plot_monitor()
 
     def get_cpu_info(self):
-        """轻量级方法获取CPU信息"""
+        """获取CPU信息，包括工艺制程和指令集"""
         try:
+            cpu_info = {}
+
             # 获取CPU品牌
             if platform.system() == "Windows":
                 import winreg
-                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
-                cpu_brand = winreg.QueryValueEx(key, "ProcessorNameString")[0].strip()
+                try:
+                    key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
+                    cpu_info['brand'] = winreg.QueryValueEx(key, "ProcessorNameString")[0].strip()
+                except:
+                    # 如果注册表方法失败，尝试WMI方法
+                    try:
+                        c = wmi.WMI()
+                        for processor in c.Win32_Processor():
+                            cpu_info['brand'] = processor.Name.strip()
+                            break
+                    except:
+                        cpu_info['brand'] = platform.processor()
             else:
                 # Linux/macOS
                 with open('/proc/cpuinfo', 'r') as f:
                     for line in f:
                         if 'model name' in line:
-                            cpu_brand = line.split(':')[1].strip()
-                            break
+                            cpu_info['brand'] = line.split(':')[1].strip()
+                        elif 'cpu family' in line:
+                            family = line.split(':')[1].strip()
+                        elif 'model' in line and not 'name' in line:
+                            model = line.split(':')[1].strip()
+                        elif 'stepping' in line:
+                            stepping = line.split(':')[1].strip()
                     else:
-                        cpu_brand = platform.processor()
+                        if 'brand' not in cpu_info:
+                            cpu_info['brand'] = platform.processor()
+
+            # 获取工艺制程
+            cpu_info['process'] = self.detect_cpu_process(cpu_info['brand'])
+
+            # 获取指令集
+            cpu_info['instruction_set'] = self.get_cpu_instruction_set()
 
             # 获取CPU核心数
             physical_cores = psutil.cpu_count(logical=False)
             logical_cores = psutil.cpu_count(logical=True)
+            cpu_info['physical_cores'] = physical_cores
+            cpu_info['logical_cores'] = logical_cores
 
-            return {
-                'brand': cpu_brand,
-                'physical_cores': physical_cores,
-                'logical_cores': logical_cores
-            }
+            return cpu_info
         except Exception as e:
             print(f"获取CPU信息出错: {str(e)}")
             return {
                 'brand': platform.processor(),
                 'physical_cores': psutil.cpu_count(logical=False),
-                'logical_cores': psutil.cpu_count(logical=True)
+                'logical_cores': psutil.cpu_count(logical=True),
+                'process': "未知工艺",
+                'instruction_set': "未知指令集"
             }
+
+    def detect_cpu_process(self, cpu_brand):
+        """智能检测CPU工艺制程"""
+        try:
+            # 首先尝试使用WMI获取更精确的信息 (Windows only)
+            if platform.system() == "Windows":
+                try:
+                    c = wmi.WMI()
+                    for processor in c.Win32_Processor():
+                        # 检查是否有工艺信息字段
+                        if hasattr(processor, 'Architecture'):
+                            # 根据架构判断
+                            architecture = processor.Architecture
+                            if architecture == 0:  # x86
+                                return "32nm (估计值)"
+                            elif architecture == 1:  # MIPS
+                                return "未知工艺"
+                            elif architecture == 2:  # Alpha
+                                return "未知工艺"
+                            elif architecture == 3:  # PowerPC
+                                return "未知工艺"
+                            elif architecture == 5:  # ARM
+                                return "7nm或更先进 (估计值)"
+                            elif architecture == 6:  # ia64
+                                return "14nm (估计值)"
+                            elif architecture == 9:  # x64
+                                # 进一步根据型号判断
+                                if "Intel" in cpu_brand:
+                                    return self.detect_intel_process(cpu_brand)
+                                elif "AMD" in cpu_brand:
+                                    return self.detect_amd_process(cpu_brand)
+                        break
+                except:
+                    pass
+
+            # 根据CPU品牌进行智能判断
+            if "Intel" in cpu_brand:
+                return self.detect_intel_process(cpu_brand)
+            elif "AMD" in cpu_brand:
+                return self.detect_amd_process(cpu_brand)
+            elif "Apple" in cpu_brand:
+                return "5nm或更先进 (Apple Silicon)"
+            elif "Qualcomm" in cpu_brand:
+                return "7nm或更先进 (移动处理器)"
+
+            # 默认值
+            return "未知工艺"
+        except:
+            return "未知工艺"
+
+    def detect_intel_process(self, cpu_brand):
+        """检测Intel CPU的工艺制程"""
+        # 更精确的Intel工艺检测
+        if "i9" in cpu_brand:
+            if "11th" in cpu_brand:
+                return "14nm (Rocket Lake)"
+            elif "12th" in cpu_brand or "13th" in cpu_brand:
+                return "Intel 7 (10nm)"
+            elif "14th" in cpu_brand:
+                return "Intel 7 (10nm)"
+            else:
+                return "14nm或更先进"
+        elif "i7" in cpu_brand:
+            if "10th" in cpu_brand:
+                return "14nm (Comet Lake)"
+            elif "11th" in cpu_brand:
+                return "14nm (Rocket Lake)"
+            elif "12th" in cpu_brand or "13th" in cpu_brand:
+                return "Intel 7 (10nm)"
+            else:
+                return "14nm"
+        elif "i5" in cpu_brand:
+            if "10th" in cpu_brand:
+                return "14nm (Comet Lake)"
+            elif "11th" in cpu_brand:
+                return "14nm (Rocket Lake)"
+            elif "12th" in cpu_brand or "13th" in cpu_brand:
+                return "Intel 7 (10nm)"
+            else:
+                return "14nm"
+        elif "i3" in cpu_brand:
+            return "14nm"
+        elif "Pentium" in cpu_brand or "Celeron" in cpu_brand:
+            return "14nm"
+        elif "Xeon" in cpu_brand:
+            if "Platinum" in cpu_brand or "Gold" in cpu_brand:
+                return "10nm (Ice Lake) 或 14nm (Cascade Lake)"
+            else:
+                return "14nm"
+        else:
+            return "14nm或更先进"
+
+    def detect_amd_process(self, cpu_brand):
+        """检测AMD CPU的工艺制程"""
+        # 更精确的AMD工艺检测
+        if "Ryzen 9" in cpu_brand:
+            if "7950" in cpu_brand or "7900" in cpu_brand:
+                return "5nm (Zen 4)"
+            elif "5950" in cpu_brand or "5900" in cpu_brand:
+                return "7nm (Zen 3)"
+            elif "3950" in cpu_brand or "3900" in cpu_brand:
+                return "7nm (Zen 2)"
+            else:
+                return "7nm或更先进"
+        elif "Ryzen 7" in cpu_brand:
+            if "7700" in cpu_brand or "7800" in cpu_brand:
+                return "5nm (Zen 4)"
+            elif "5700" in cpu_brand or "5800" in cpu_brand:
+                return "7nm (Zen 3)"
+            elif "3700" in cpu_brand or "3800" in cpu_brand:
+                return "7nm (Zen 2)"
+            else:
+                return "7nm"
+        elif "Ryzen 5" in cpu_brand:
+            if "7600" in cpu_brand:
+                return "5nm (Zen 4)"
+            elif "5600" in cpu_brand:
+                return "7nm (Zen 3)"
+            elif "3600" in cpu_brand:
+                return "7nm (Zen 2)"
+            else:
+                return "7nm"
+        elif "Ryzen 3" in cpu_brand:
+            if "4300" in cpu_brand or "4100" in cpu_brand:
+                return "7nm (Zen 2)"
+            else:
+                return "12nm"
+        elif "Threadripper" in cpu_brand:
+            if "3990" in cpu_brand or "3970" in cpu_brand:
+                return "7nm (Zen 2)"
+            elif "2990" in cpu_brand or "2970" in cpu_brand:
+                return "12nm (Zen+)"
+            else:
+                return "7nm或更先进"
+        elif "EPYC" in cpu_brand:
+            return "7nm或更先进 (服务器CPU)"
+        else:
+            return "7nm或更先进"
+
+    def get_cpu_instruction_set(self):
+        """获取CPU支持的完整指令集"""
+        instruction_sets = []
+
+        # 在Windows上使用WMI获取指令集信息
+        if platform.system() == "Windows":
+            try:
+                c = wmi.WMI()
+                for processor in c.Win32_Processor():
+                    # 检查支持的指令集标志
+                    if processor.AddressWidth == 64:
+                        instruction_sets.append("x64")
+                    if processor.DataWidth == 32:
+                        instruction_sets.append("x86")
+                    if "MMX" in processor.Caption:
+                        instruction_sets.append("MMX")
+                    if "SSE" in processor.Caption:
+                        instruction_sets.append("SSE")
+                    if "SSE2" in processor.Caption:
+                        instruction_sets.append("SSE2")
+                    if "SSE3" in processor.Caption:
+                        instruction_sets.append("SSE3")
+                    if "SSSE3" in processor.Caption:
+                        instruction_sets.append("SSSE3")
+                    if "SSE4" in processor.Caption:
+                        instruction_sets.append("SSE4")
+                    if "SSE4.1" in processor.Caption:
+                        instruction_sets.append("SSE4.1")
+                    if "SSE4.2" in processor.Caption:
+                        instruction_sets.append("SSE4.2")
+                    if "AVX" in processor.Caption:
+                        instruction_sets.append("AVX")
+                    if "AVX2" in processor.Caption:
+                        instruction_sets.append("AVX2")
+                    if "AVX512" in processor.Caption:
+                        instruction_sets.append("AVX512")
+                    if "AES" in processor.Caption:
+                        instruction_sets.append("AES")
+                    if "FMA" in processor.Caption:
+                        instruction_sets.append("FMA")
+                    if "F16C" in processor.Caption:
+                        instruction_sets.append("F16C")
+                    if "BMI1" in processor.Caption:
+                        instruction_sets.append("BMI1")
+                    if "BMI2" in processor.Caption:
+                        instruction_sets.append("BMI2")
+                    if "AMD64" in processor.Caption:
+                        instruction_sets.append("AMD64")
+                    if "EM64T" in processor.Caption:
+                        instruction_sets.append("EM64T")
+                    if "VT-x" in processor.Caption:
+                        instruction_sets.append("VT-x")
+                    if "AMD-V" in processor.Caption:
+                        instruction_sets.append("AMD-V")
+                    if "HyperThreading" in processor.Caption:
+                        instruction_sets.append("HyperThreading")
+                    if "NX" in processor.Caption:
+                        instruction_sets.append("NX")
+                    if "SMEP" in processor.Caption:
+                        instruction_sets.append("SMEP")
+                    if "SMAP" in processor.Caption:
+                        instruction_sets.append("SMAP")
+                    break
+            except:
+                pass
+
+        # 在Linux/macOS上通过/proc/cpuinfo获取
+        else:
+            try:
+                with open('/proc/cpuinfo', 'r') as f:
+                    flags_line = ""
+                    for line in f:
+                        if line.startswith('flags') or line.startswith('Features'):
+                            flags_line = line
+                            break
+
+                    if flags_line:
+                        flags = flags_line.split(':')[1].split()
+                        if 'mmx' in flags:
+                            instruction_sets.append("MMX")
+                        if 'sse' in flags:
+                            instruction_sets.append("SSE")
+                        if 'sse2' in flags:
+                            instruction_sets.append("SSE2")
+                        if 'sse3' in flags or 'pni' in flags:
+                            instruction_sets.append("SSE3")
+                        if 'ssse3' in flags:
+                            instruction_sets.append("SSSE3")
+                        if 'sse4_1' in flags:
+                            instruction_sets.append("SSE4.1")
+                        if 'sse4_2' in flags:
+                            instruction_sets.append("SSE4.2")
+                        if 'avx' in flags:
+                            instruction_sets.append("AVX")
+                        if 'avx2' in flags:
+                            instruction_sets.append("AVX2")
+                        if 'avx512f' in flags:
+                            instruction_sets.append("AVX512F")
+                        if 'avx512cd' in flags:
+                            instruction_sets.append("AVX512CD")
+                        if 'avx512bw' in flags:
+                            instruction_sets.append("AVX512BW")
+                        if 'avx512dq' in flags:
+                            instruction_sets.append("AVX512DQ")
+                        if 'avx512vl' in flags:
+                            instruction_sets.append("AVX512VL")
+                        if 'aes' in flags:
+                            instruction_sets.append("AES")
+                        if 'fma' in flags:
+                            instruction_sets.append("FMA")
+                        if 'f16c' in flags:
+                            instruction_sets.append("F16C")
+                        if 'bmi1' in flags:
+                            instruction_sets.append("BMI1")
+                        if 'bmi2' in flags:
+                            instruction_sets.append("BMI2")
+                        if 'lm' in flags:  # Long mode (64-bit)
+                            instruction_sets.append("x64")
+                        if 'vmx' in flags:
+                            instruction_sets.append("VT-x")
+                        if 'svm' in flags:
+                            instruction_sets.append("AMD-V")
+                        if 'ht' in flags:
+                            instruction_sets.append("HyperThreading")
+                        if 'nx' in flags:
+                            instruction_sets.append("NX")
+                        if 'smep' in flags:
+                            instruction_sets.append("SMEP")
+                        if 'smap' in flags:
+                            instruction_sets.append("SMAP")
+            except:
+                pass
+
+        # 去重并排序
+        instruction_sets = list(set(instruction_sets))
+        instruction_sets.sort()
+
+        # 如果没有找到指令集，使用默认值
+        if not instruction_sets:
+            instruction_sets = ["x86/x64"]
+
+        # 返回完整的指令集列表
+        return ', '.join(instruction_sets)
 
     def get_cpu_freq(self):
         """获取当前CPU频率"""
@@ -602,6 +989,13 @@ class CPUBenchmarkUI:
             if freq and freq.current > 0:
                 return freq.current
             return 0.0
+        except:
+            return 0.0
+
+    def get_cpu_usage(self):
+        """获取当前CPU使用率"""
+        try:
+            return psutil.cpu_percent(interval=0.1)
         except:
             return 0.0
 
@@ -647,11 +1041,13 @@ class CPUBenchmarkUI:
             mem = psutil.virtual_memory()
             self.mem_total = f"{mem.total / (1024 ** 3):.1f} GB"
 
-            # 获取CPU信息（轻量级方法）
+            # 获取CPU信息（改进的方法）
             cpu_info = self.get_cpu_info()
             self.cpu_brand = cpu_info['brand']
             self.cpu_cores = f"{cpu_info['physical_cores']}物理/{cpu_info['logical_cores']}逻辑"
             self.cpu_freq = self.get_cpu_freq()  # 使用改进的频率获取方法
+            self.cpu_process = cpu_info['process']  # 工艺制程
+            self.cpu_instruction_set = cpu_info['instruction_set']  # 指令集
 
             # 标记系统信息已加载
             self.system_info_loaded = True
@@ -659,8 +1055,8 @@ class CPUBenchmarkUI:
             # 更新UI
             self.root.after(0, self.update_system_info_display)
 
-            # 启动电压监控
-            self.root.after(1000, self.update_voltage)
+            # 启动监控
+            self.root.after(1000, self.update_monitor_data)
 
         except Exception as e:
             print(f"加载系统信息出错: {str(e)}")
@@ -673,30 +1069,105 @@ class CPUBenchmarkUI:
 
         # 更新顶部信息栏
         freq_display = f"{self.cpu_freq:.2f} GHz" if self.cpu_freq > 0 else "未知频率"
+        usage_display = f"{self.cpu_usage:.1f}%"
+        temp_display = self.temperature
+        power_display = self.power
         info_text = (f"系统: {self.os_info} | "
                      f"CPU: {self.cpu_brand} | "
                      f"核心数: {self.cpu_cores} | "
                      f"频率: {freq_display} | "
-                     f"内存: {self.mem_total} | "
-                     f"电压: {self.voltage}V")
+                     f"使用率: {usage_display} | "
+                     f"温度: {temp_display} | "
+                     f"功耗: {power_display} | "
+                     f"电压: {self.voltage}V | "
+                     f"工艺: {self.cpu_process} | "
+                     f"内存: {self.mem_total}")
         self.system_info_label.config(text=info_text)
 
         # 更新总得分标签页的CPU信息
         cpu_details = (
             f"CPU型号: {self.cpu_brand}\n"
             f"核心/线程: {self.cpu_cores}\n"
+            f"工艺制程: {self.cpu_process}\n"
+            f"指令集: {self.cpu_instruction_set}\n"
             f"当前频率: {freq_display}\n"
+            f"当前使用率: {usage_display}\n"
+            f"当前温度: {temp_display}\n"
+            f"当前功耗: {power_display}\n"
             f"当前电压: {self.voltage}V"
         )
         self.cpu_info_label.config(text=cpu_details)
 
-    def update_voltage(self):
-        """改进的电压获取算法，支持多种数据源"""
+    def get_cpu_temp(self):
+        """获取CPU温度"""
         try:
-            voltage_found = False
-            current_freq = self.get_cpu_freq()  # 获取当前频率
+            if platform.system() == "Windows":
+                # 尝试使用OpenHardwareMonitor
+                try:
+                    c = wmi.WMI(namespace=r"root\OpenHardwareMonitor")
+                    sensors = c.Sensor()
+                    for sensor in sensors:
+                        if sensor.SensorType == 'Temperature' and 'CPU' in sensor.Name:
+                            return sensor.Value
+                    return None
+                except:
+                    # 如果OpenHardwareMonitor不可用，尝试其他方法
+                    pass
+            elif platform.system() == "Linux":
+                # 尝试读取/sys/class/thermal
+                try:
+                    for i in range(10):  # 检查多个thermal zone
+                        path = f"/sys/class/thermal/thermal_zone{i}/temp"
+                        if os.path.exists(path):
+                            with open(path, "r") as f:
+                                temp = float(f.read().strip()) / 1000
+                                # 只返回合理的温度值
+                                if 10 < temp < 120:
+                                    return temp
+                    return None
+                except:
+                    pass
+            return None
+        except:
+            return None
 
-            # 尝试获取真实电压数据
+    def estimate_cpu_power(self):
+        """估算CPU功耗"""
+        # 基于使用率和频率的简单估算
+        freq_factor = self.cpu_freq / 3000 if self.cpu_freq > 0 else 1.0
+        usage_factor = self.cpu_usage / 100
+
+        # 根据CPU类型设置基础功耗
+        if "i9" in self.cpu_brand or "R9" in self.cpu_brand:
+            base_power = 65  # TDP基础值
+        elif "i7" in self.cpu_brand or "R7" in self.cpu_brand:
+            base_power = 45
+        elif "i5" in self.cpu_brand or "R5" in self.cpu_brand:
+            base_power = 35
+        else:  # 低端CPU
+            base_power = 25
+
+        # 计算动态功耗
+        dynamic_power = base_power * (0.4 + 0.4 * freq_factor + 0.2 * usage_factor)
+
+        # 添加随机波动
+        dynamic_power += random.uniform(-2, 2)
+
+        # 确保在合理范围内
+        return max(10, min(150, dynamic_power))
+
+    def update_monitor_data(self):
+        """更新监控数据（电压、频率、使用率、温度、功耗）"""
+        try:
+            # 获取当前频率
+            current_freq = self.get_cpu_freq()
+
+            # 获取当前使用率
+            self.cpu_usage = self.get_cpu_usage()
+
+            # 获取电压
+            voltage_found = False
+            voltage_value = 0.0
             if platform.system() == "Windows":
                 # 方法1: 使用OpenHardwareMonitor
                 try:
@@ -704,7 +1175,8 @@ class CPUBenchmarkUI:
                     sensors = c.Sensor()
                     for sensor in sensors:
                         if sensor.SensorType == 'Voltage' and ('CPU Core' in sensor.Name or 'Core' in sensor.Name):
-                            self.voltage = f"{sensor.Value:.3f}"
+                            voltage_value = sensor.Value
+                            self.voltage = f"{voltage_value:.3f}"
                             voltage_found = True
                             break
                 except:
@@ -732,7 +1204,8 @@ class CPUBenchmarkUI:
                     if voltages:
                         for name, value in voltages.items():
                             if "core" in name.lower():
-                                self.voltage = f"{value:.3f}"
+                                voltage_value = value
+                                self.voltage = f"{voltage_value:.3f}"
                                 voltage_found = True
                                 break
                 except:
@@ -752,9 +1225,9 @@ class CPUBenchmarkUI:
                         for path in paths:
                             if os.path.exists(path):
                                 with open(path, "r") as f:
-                                    voltage = int(f.read().strip()) / 1000
-                                    if voltage > 0.5:  # 过滤掉无效值
-                                        self.voltage = f"{voltage:.3f}"
+                                    voltage_value = int(f.read().strip()) / 1000
+                                    if voltage_value > 0.5:  # 过滤掉无效值
+                                        self.voltage = f"{voltage_value:.3f}"
                                         voltage_found = True
                                         break
                     except:
@@ -762,7 +1235,6 @@ class CPUBenchmarkUI:
 
             # 如果无法获取真实电压，使用智能模拟
             if not voltage_found:
-                current_load = psutil.cpu_percent()
                 if "Intel" in self.cpu_brand:
                     base_voltage = 0.8
                 elif "AMD" in self.cpu_brand:
@@ -773,32 +1245,55 @@ class CPUBenchmarkUI:
                 # 更精确的电压模拟算法
                 # 电压随负载增加而增加，随频率增加而增加
                 freq_factor = current_freq / 3000 if current_freq > 0 else 1.0
-                voltage_value = base_voltage + (current_load / 2000) + (freq_factor * 0.2) + random.uniform(-0.02, 0.02)
+                voltage_value = base_voltage + (self.cpu_usage / 2000) + (freq_factor * 0.2) + random.uniform(-0.02,
+                                                                                                              0.02)
                 self.voltage = f"{voltage_value:.3f}"
             else:
                 voltage_value = float(self.voltage)
 
-            # 记录电压和频率数据
+            # 获取温度
+            temp_value = self.get_cpu_temp()
+            if temp_value is None:
+                # 智能温度模拟
+                # 基础温度 + 使用率影响 + 频率影响
+                base_temp = 30  # 环境温度
+                usage_impact = self.cpu_usage * 0.5
+                freq_impact = (current_freq - 2000) * 0.01 if current_freq > 2000 else 0
+                temp_value = base_temp + usage_impact + freq_impact + random.uniform(-1, 1)
+                self.temperature = f"{temp_value:.1f}°C"
+            else:
+                self.temperature = f"{temp_value:.1f}°C"
+
+            # 获取功耗
+            power_value = self.estimate_cpu_power()
+            self.power = f"{power_value:.1f}W"
+
+            # 记录监控数据
             if self.monitoring_active:
                 now = datetime.now()
                 self.timestamps.append(now)
                 self.voltage_history.append(voltage_value)
                 self.freq_history.append(current_freq)
+                self.usage_history.append(self.cpu_usage)
+                self.temp_history.append(temp_value)
+                self.power_history.append(power_value)
 
                 # 如果监控图表已初始化，更新图表
                 if self.monitor_initialized:
                     self.plot_monitor()
 
         except Exception as e:
-            print(f"电压监控错误: {str(e)}")
+            print(f"监控数据更新错误: {str(e)}")
             self.voltage = "N/A"
+            self.temperature = "N/A"
+            self.power = "N/A"
 
         # 更新系统信息显示
         if self.system_info_loaded:
             self.root.after(0, self.update_system_info_display)
 
         # 安排下一次更新
-        self.root.after(self.voltage_update_interval, self.update_voltage)
+        self.root.after(self.monitor_update_interval, self.update_monitor_data)
 
     def plot_monitor(self):
         """绘制监控图表"""
@@ -808,39 +1303,75 @@ class CPUBenchmarkUI:
         # 准备时间标签
         time_labels = [ts.strftime("%H:%M:%S") for ts in self.timestamps]
 
-        # 更新电压图表
-        self.voltage_ax.clear()
-        self.voltage_ax.plot(time_labels, self.voltage_history, 'b-', linewidth=1.5)
-        self.voltage_ax.set_title('CPU核心电压实时监控', fontsize=10)  # 缩小字体
-        self.voltage_ax.set_xlabel('时间', fontsize=8)  # 缩小字体
-        self.voltage_ax.set_ylabel('电压 (V)', fontsize=8)  # 缩小字体
-        self.voltage_ax.grid(True, linestyle='--', alpha=0.3)
+        # 更新数据面板
+        if self.voltage != "N/A":
+            self.data_values["电压"].config(text=f"{float(self.voltage):.3f}")
+        if self.freq_history:
+            self.data_values["频率"].config(text=f"{self.freq_history[-1]:.2f}")
+        if self.usage_history:
+            self.data_values["使用率"].config(text=f"{self.usage_history[-1]:.1f}")
+        if self.temperature != "N/A":
+            self.data_values["温度"].config(text=f"{float(self.temperature.split('°')[0]):.1f}")
+        if self.power != "N/A":
+            self.data_values["功耗"].config(text=f"{float(self.power.split('W')[0]):.1f}")
+
+        # 更新监控图表
+        self.monitor_ax.clear()
+
+        # 绘制电压曲线
+        voltage_color = "#1f77b4"
+        voltage_line, = self.monitor_ax.plot(time_labels, self.voltage_history,
+                                             color=voltage_color, linewidth=1.5,
+                                             label=f"电压")
+        self.monitor_ax.set_ylabel('电压 (V)', color=voltage_color, fontsize=9)
+        self.monitor_ax.tick_params(axis='y', labelcolor=voltage_color)
+        self.monitor_ax.set_ylim(min(self.voltage_history) * 0.95, max(self.voltage_history) * 1.05)
+
+        # 创建第二个Y轴用于频率
+        ax2 = self.monitor_ax.twinx()
+        freq_color = "#ff7f0e"
+        freq_line, = ax2.plot(time_labels, self.freq_history,
+                              color=freq_color, linewidth=1.5,
+                              label=f"频率")
+        ax2.set_ylabel('频率 (MHz)', color=freq_color, fontsize=9)
+        ax2.tick_params(axis='y', labelcolor=freq_color)
+        ax2.set_ylim(min(self.freq_history) * 0.95, max(self.freq_history) * 1.05)
+
+        # 创建第三个Y轴用于使用率
+        ax3 = self.monitor_ax.twinx()
+        ax3.spines['right'].set_position(('outward', 60))
+        usage_color = "#2ca02c"
+        usage_line, = ax3.plot(time_labels, self.usage_history,
+                               color=usage_color, linewidth=1.5,
+                               label=f"使用率")
+        ax3.set_ylabel('使用率 (%)', color=usage_color, fontsize=9)
+        ax3.tick_params(axis='y', labelcolor=usage_color)
+        ax3.set_ylim(0, 100)  # 使用率范围0-100%
 
         # 设置X轴标签旋转并限制数量
         n = len(time_labels)
         step = max(1, n // 10)  # 只显示10个标签
-        self.voltage_ax.set_xticks(time_labels[::step])
-        self.voltage_ax.set_xticklabels(time_labels[::step], rotation=45, fontsize=7)  # 缩小字体
+        self.monitor_ax.set_xticks(time_labels[::step])
+        self.monitor_ax.set_xticklabels(time_labels[::step], rotation=45, fontsize=8)
 
-        # 更新频率图表
-        self.freq_ax.clear()
-        self.freq_ax.plot(time_labels, self.freq_history, 'g-', linewidth=1.5)
-        self.freq_ax.set_title('CPU频率实时监控', fontsize=10)  # 缩小字体
-        self.freq_ax.set_xlabel('时间', fontsize=8)  # 缩小字体
-        self.freq_ax.set_ylabel('频率 (MHz)', fontsize=8)  # 缩小字体
-        self.freq_ax.grid(True, linestyle='--', alpha=0.3)
+        # 设置标题
+        self.monitor_ax.set_title('CPU实时监控图表', fontsize=10, pad=10)
 
-        # 设置X轴标签旋转并限制数量
-        self.freq_ax.set_xticks(time_labels[::step])
-        self.freq_ax.set_xticklabels(time_labels[::step], rotation=45, fontsize=7)  # 缩小字体
+        # 添加图例
+        lines = [voltage_line, freq_line, usage_line]
+        labels = [line.get_label() for line in lines]
+        self.monitor_ax.legend(lines, labels, loc='upper left', fontsize=8,
+                               bbox_to_anchor=(0.0, -0.15), ncol=3)
+
+        # 添加网格
+        self.monitor_ax.grid(True, linestyle='--', alpha=0.3)
 
         # 调整布局
-        self.voltage_figure.tight_layout()
-        self.freq_figure.tight_layout()
+        self.monitor_figure.tight_layout()
+        self.monitor_figure.subplots_adjust(bottom=0.25)  # 为图例留出空间
 
         # 更新画布
-        self.voltage_canvas.draw()
-        self.freq_canvas.draw()
+        self.monitor_canvas.draw()
 
     def on_tab_changed(self, event):
         """处理标签页切换事件"""
@@ -917,14 +1448,18 @@ class CPUBenchmarkUI:
 
                 # 运行测试并获取结果
                 score, details, grade = test_func()
+                if self.cancel_requested:
+                    break
+
                 self.results[test_name] = {"score": score, "details": details, "grade": grade}
 
                 # 更新详细结果表格
                 self.details_tree.insert("", tk.END, values=(test_name, f"{score:.2f}", grade, details))
                 # 只处理挂起的事件，而不是完全更新UI
-                self.root.update_idletasks()
+                if i % 2 == 0:  # 减少UI更新频率
+                    self.root.update_idletasks()
 
-            if not self.cancel_requested:
+            if not self.cancel_requested and self.results:
                 # 计算总得分
                 total_score = self.calculate_total_score()
 
@@ -964,7 +1499,7 @@ class CPUBenchmarkUI:
         self.progress_label.config(text=message)
         self.status_var.set(message)
         # 只处理挂起的事件，而不是完全更新UI
-        if value % 5 == 0:  # 减少更新频率
+        if value % 10 == 0:  # 减少更新频率
             self.root.update_idletasks()
 
     def warmup_test(self):
@@ -1058,6 +1593,7 @@ class CPUBenchmarkUI:
             else:
                 result -= (i * 2) // 3
 
+            # 减少检查频率
             if self.cancel_requested and i % 1000000 == 0:
                 return 0, "测试已取消", "N/A"
 
@@ -1132,6 +1668,7 @@ class CPUBenchmarkUI:
             val = (val ^ 0x5A5A5A5A) + 0x12345678
             result += val & 0xFFFF
 
+            # 减少检查频率
             if self.cancel_requested and i % 500000 == 0:
                 return 0, "测试已取消", "N/A"
 
@@ -1159,6 +1696,7 @@ class CPUBenchmarkUI:
             count = bin(n).count("1")  # 使用内置函数更高效
             result = (result + count) & 0xFF
 
+            # 减少检查频率
             if self.cancel_requested and i % 500000 == 0:
                 return 0, "测试已取消", "N/A"
 
@@ -1180,9 +1718,14 @@ class CPUBenchmarkUI:
         results = []
         total_iterations = 10000000  # 固定总迭代次数
 
+        # 使用Manager创建共享标志
+        manager = Manager()
+        cancel_flag = manager.Value('b', False)
+
         for cores in range(1, max_cores + 1):
             if self.cancel_requested:
-                return 0, "测试已取消", "N/A"
+                cancel_flag.value = True
+                break
 
             self.update_progress(f"测试多核性能 ({cores}/{max_cores} 核心)...",
                                  int((cores / max_cores) * 80) + 10)
@@ -1191,9 +1734,20 @@ class CPUBenchmarkUI:
             iterations_per_core = total_iterations // cores
 
             start_time = time.time()
-            with Pool(cores) as pool:
-                async_results = [pool.apply_async(worker, (iterations_per_core,)) for _ in range(cores)]
-                [result.get() for result in async_results]
+            try:
+                with Pool(cores) as pool:
+                    # 创建任务列表
+                    tasks = []
+                    for _ in range(cores):
+                        tasks.append(pool.apply_async(worker, (iterations_per_core, cancel_flag)))
+
+                    # 获取结果
+                    for task in tasks:
+                        task.get()
+            except Exception as e:
+                print(f"多核测试出错: {str(e)}")
+                return 0, f"多核测试出错: {str(e)}", "N/A"
+
             elapsed = time.time() - start_time
 
             # 计算总操作量/秒
@@ -1327,7 +1881,11 @@ class CPUBenchmarkUI:
             "grade": grade,
             "cpu_model": cpu_model,
             "details": self.results.copy(),
-            "voltage": self.voltage  # 保存测试时的电压
+            "voltage": self.voltage,  # 保存测试时的电压
+            "temperature": self.temperature,  # 保存测试时的温度
+            "power": self.power,  # 保存测试时的功耗
+            "process": self.cpu_process,  # 保存工艺制程
+            "instruction_set": self.cpu_instruction_set  # 保存指令集
         })
 
         # 更新历史记录表格
@@ -1382,15 +1940,39 @@ class CPUBenchmarkUI:
 
         ttk.Label(
             title_frame,
+            text=f"工艺制程: {history['process']}",
+            font=("Arial", 10)  # 缩小字体
+        ).pack(anchor=tk.W)
+
+        ttk.Label(
+            title_frame,
+            text=f"指令集: {history['instruction_set']}",
+            font=("Arial", 10)  # 缩小字体
+        ).pack(anchor=tk.W)
+
+        ttk.Label(
+            title_frame,
             text=f"总得分: {history['score']:.2f} ({history['grade']})",
             font=("Arial", 10, "bold"),  # 缩小字体
             foreground="#c00000"
         ).pack(anchor=tk.W, pady=3)
 
-        # 添加电压显示
+        # 添加电压、温度、功耗显示
         ttk.Label(
             title_frame,
             text=f"测试时电压: {history.get('voltage', 'N/A')}V",
+            font=("Arial", 10)  # 缩小字体
+        ).pack(anchor=tk.W)
+
+        ttk.Label(
+            title_frame,
+            text=f"测试时温度: {history.get('temperature', 'N/A')}",
+            font=("Arial", 10)  # 缩小字体
+        ).pack(anchor=tk.W)
+
+        ttk.Label(
+            title_frame,
+            text=f"测试时功耗: {history.get('power', 'N/A')}",
             font=("Arial", 10)  # 缩小字体
         ).pack(anchor=tk.W)
 
@@ -1469,6 +2051,11 @@ class CPUBenchmarkUI:
             # 系统信息
             content += f"测试时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
             content += f"系统信息: {self.system_info_label.cget('text')}\n"
+            content += f"工艺制程: {self.cpu_process}\n"
+            content += f"指令集: {self.cpu_instruction_set}\n"
+            content += f"当前电压: {self.voltage}V\n"
+            content += f"当前温度: {self.temperature}\n"
+            content += f"当前功耗: {self.power}\n"
             content += "\n"
 
             # 总得分

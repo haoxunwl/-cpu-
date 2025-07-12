@@ -13,8 +13,16 @@ github开源地址：https://github.com/haoxunwl/-cpu-/tree/main
 本程序采用python开发，采用MIT开源协议，可二次开发，欢迎大家在基于本程序上开发各种有意思好用好玩的功能！
 
 程序截图：
+<img width="806" height="765" alt="屏幕截图 2025-07-12 123929" src="https://github.com/user-attachments/assets/78b99fcd-2f65-4b69-9d3a-ad6d8cc9017b" />
+<img width="803" height="766" alt="屏幕截图 2025-07-12 123727" src="https://github.com/user-attachments/assets/49c347f1-6924-4919-9a1b-b5c2da0a0e7b" />
+<img width="806" height="771" alt="屏幕截图 2025-07-12 123737" src="https://github.com/user-attachments/assets/2a8b2eb2-1566-445b-9b19-2a21f377cec7" />
+<img width="806" height="768" alt="屏幕截图 2025-07-12 123745" src="https://github.com/user-attachments/assets/a21764a8-b8f3-4e75-a57f-14ca369b9e58" />
+<img width="805" height="768" alt="屏幕截图 2025-07-12 123755" src="https://github.com/user-attachments/assets/cf58b1d0-b697-4492-95f9-9d64bce9d779" />
+<img width="806" height="768" alt="屏幕截图 2025-07-12 123803" src="https://github.com/user-attachments/assets/7ffbfa7a-5540-4445-bb15-cd7d4e56d361" />
+<img width="1706" height="1280" alt="浩讯电脑品牌logo" src="https://github.com/user-attachments/assets/3c69445b-d5c6-4d89-80cf-4f9446fcebf6" />
 
 
+项目开发日志：
 2025年6月14日
 初代程序版本1.0
 1.发布了初代产品程序1.0

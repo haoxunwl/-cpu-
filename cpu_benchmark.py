@@ -28,6 +28,7 @@ import os
 import subprocess
 from collections import deque
 from datetime import datetime
+import gc  # 导入垃圾回收模块
 
 # 忽略Matplotlib字体警告
 warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")
@@ -52,15 +53,20 @@ def worker(iterations, cancel_flag):
 class CPUBenchmarkUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("浩讯亿通©专业CPU性能测试工具1.0---浩讯亿通电脑店-2025")
+        self.root.title("浩讯亿通©专业CPU性能测试工具1.0.1---浩讯亿通电脑店-2025")
         self.root.geometry("800x730")  # 缩小窗口尺寸
         self.root.minsize(800, 600)  # 缩小最小尺寸
         self.root.configure(bg="#f0f0f0")
+
+        # 添加窗口关闭事件处理
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         # 设置启动优化标志
         self.system_info_loaded = False
         self.chart_initialized = False
         self.monitor_initialized = False
+        self.hardware_info_initialized = False
+        self.is_closing = False  # 标记程序是否正在关闭
 
         # 存储测试结果
         self.results = {}
@@ -76,8 +82,12 @@ class CPUBenchmarkUI:
         self.temp_history = deque(maxlen=120)  # 存储最近2分钟的温度数据
         self.power_history = deque(maxlen=120)  # 存储最近2分钟的功耗数据
         self.timestamps = deque(maxlen=120)  # 存储时间戳
-        self.monitor_update_interval = 1000  # 监控更新间隔(毫秒)
+        self.monitor_update_interval = 2000  # 监控更新间隔(毫秒) - 从1000增加到2000
         self.monitoring_active = True
+        self.monitor_after_id = None  # 用于存储after事件ID
+        self.last_plot_time = 0  # 记录上次绘图时间
+        self.plot_interval = 5  # 绘图间隔(秒)
+        self.monitor_update_counter = 0  # 监控更新计数器
 
         # 初始化CPU信息占位符
         self.cpu_brand = "加载中..."
@@ -89,11 +99,41 @@ class CPUBenchmarkUI:
         self.cpu_process = "加载中..."  # CPU工艺制程
         self.cpu_instruction_set = "加载中..."  # CPU指令集
 
+        # 初始化硬件信息
+        self.hardware_info = {
+            "cpu": {"model": "加载中...", "cores": "加载中...", "freq": "加载中..."},
+            "memory": {"brand": "加载中...", "size": "加载中...", "type": "加载中..."},
+            "gpu": {"brand": "加载中...", "model": "加载中...", "vram": "加载中..."},
+            "motherboard": {"brand": "加载中...", "model": "加载中..."},
+            "storage": {"disks": []},
+            "display": {"model": "加载中...", "size": "加载中...", "resolution": "加载中..."}
+        }
+
         # 创建UI
         self.create_widgets()
 
         # 启动后台加载系统信息
         threading.Thread(target=self.load_system_info, daemon=True).start()
+
+    def on_closing(self):
+        """处理窗口关闭事件"""
+        self.is_closing = True
+
+        # 取消监控更新
+        if self.monitor_after_id:
+            self.root.after_cancel(self.monitor_after_id)
+
+        # 设置取消标志
+        self.cancel_requested = True
+        self.running = False
+        self.monitoring_active = False
+
+        # 显式调用垃圾回收
+        gc.collect()
+
+        # 等待0.5秒让线程有机会退出
+        time.sleep(0.5)
+        self.root.destroy()
 
     def create_widgets(self):
         # 创建顶部信息栏 - 使用更小的字体
@@ -137,6 +177,11 @@ class CPUBenchmarkUI:
         self.monitor_tab = ttk.Frame(self.tab_control)
         self.tab_control.add(self.monitor_tab, text="实时监控")
         self.setup_monitor_placeholder()
+
+        # 电脑配置标签页
+        self.hardware_tab = ttk.Frame(self.tab_control)
+        self.tab_control.add(self.hardware_tab, text="电脑配置")
+        self.setup_hardware_placeholder()
 
         # 创建底部控制区域
         control_frame = ttk.Frame(self.root, padding=5)
@@ -516,6 +561,23 @@ class CPUBenchmarkUI:
         )
         self.monitor_placeholder.pack(expand=True, pady=80)  # 减少垂直间距
 
+    def setup_hardware_placeholder(self):
+        """设置电脑配置标签页占位符（延迟加载）"""
+        self.hardware_frame = ttk.LabelFrame(
+            self.hardware_tab,
+            text="电脑硬件配置",
+            padding=5  # 减少内边距
+        )
+        self.hardware_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # 添加占位标签 - 使用更小字体
+        self.hardware_placeholder = ttk.Label(
+            self.hardware_frame,
+            text="硬件信息将在首次切换到本标签页时加载...",
+            font=("Arial", 10)  # 缩小字体
+        )
+        self.hardware_placeholder.pack(expand=True, pady=80)  # 减少垂直间距
+
     def initialize_chart(self):
         """初始化图表（当首次切换到图表标签页时调用）"""
         if self.chart_initialized:
@@ -640,6 +702,234 @@ class CPUBenchmarkUI:
 
         # 绘制初始图表
         self.plot_monitor()
+
+    def initialize_hardware_info(self):
+        """初始化电脑配置信息（当首次切换到电脑配置标签页时调用）"""
+        if self.hardware_info_initialized or self.is_closing:
+            return
+
+        # 移除占位符
+        self.hardware_placeholder.destroy()
+
+        # 创建主框架
+        self.hardware_main_frame = ttk.Frame(self.hardware_frame)
+        self.hardware_main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # 创建滚动条
+        scrollbar = ttk.Scrollbar(self.hardware_main_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 创建画布
+        canvas = tk.Canvas(self.hardware_main_frame, yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=canvas.yview)
+
+        # 创建内部框架
+        self.hardware_inner_frame = ttk.Frame(canvas)
+        canvas_frame = canvas.create_window((0, 0), window=self.hardware_inner_frame, anchor="nw")
+
+        # 绑定事件
+        self.hardware_inner_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(canvas_frame, width=e.width))
+
+        # 加载硬件信息
+        self.load_hardware_info()
+
+        # 创建硬件信息显示区域
+        self.create_hardware_info_display(self.hardware_inner_frame)
+
+        # 添加刷新按钮
+        refresh_frame = ttk.Frame(self.hardware_frame)
+        refresh_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        refresh_button = ttk.Button(
+            refresh_frame,
+            text="刷新硬件信息",
+            command=self.refresh_hardware_info,
+            width=15
+        )
+        refresh_button.pack(side=tk.RIGHT, padx=5)
+
+        # 设置初始化标志
+        self.hardware_info_initialized = True
+
+    def refresh_hardware_info(self):
+        """刷新硬件信息 - 修复重复显示问题"""
+        if not self.hardware_info_initialized or self.is_closing:
+            return
+
+        # 重新加载硬件信息
+        self.load_hardware_info()
+
+        # 清除现有硬件信息显示
+        for widget in self.hardware_inner_frame.winfo_children():
+            widget.destroy()
+
+        # 重新创建硬件信息显示
+        self.create_hardware_info_display(self.hardware_inner_frame)
+
+        self.status_var.set("硬件信息已刷新")
+
+    def create_hardware_info_display(self, parent):
+        """创建硬件信息显示界面"""
+        # CPU信息
+        cpu_frame = ttk.LabelFrame(
+            parent,
+            text="处理器 (CPU)",
+            padding=10
+        )
+        cpu_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(
+            cpu_frame,
+            text=f"型号: {self.hardware_info['cpu']['model']}",
+            font=("Arial", 10)
+        ).pack(anchor=tk.W, padx=5, pady=2)
+
+        ttk.Label(
+            cpu_frame,
+            text=f"核心/线程: {self.hardware_info['cpu']['cores']}",
+            font=("Arial", 10)
+        ).pack(anchor=tk.W, padx=5, pady=2)
+
+        ttk.Label(
+            cpu_frame,
+            text=f"当前频率: {self.hardware_info['cpu']['freq']}",
+            font=("Arial", 10)
+        ).pack(anchor=tk.W, padx=5, pady=2)
+
+        ttk.Label(
+            cpu_frame,
+            text=f"工艺制程: {self.cpu_process}",
+            font=("Arial", 10)
+        ).pack(anchor=tk.W, padx=5, pady=2)
+
+        ttk.Label(
+            cpu_frame,
+            text=f"指令集: {self.cpu_instruction_set}",
+            font=("Arial", 10)
+        ).pack(anchor=tk.W, padx=5, pady=2)
+
+        # 内存信息
+        mem_frame = ttk.LabelFrame(
+            parent,
+            text="内存 (RAM)",
+            padding=10
+        )
+        mem_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(
+            mem_frame,
+            text=f"品牌: {self.hardware_info['memory']['brand']}",
+            font=("Arial", 10)
+        ).pack(anchor=tk.W, padx=5, pady=2)
+
+        ttk.Label(
+            mem_frame,
+            text=f"容量: {self.hardware_info['memory']['size']}",
+            font=("Arial", 10)
+        ).pack(anchor=tk.W, padx=5, pady=2)
+
+        ttk.Label(
+            mem_frame,
+            text=f"类型: {self.hardware_info['memory']['type']}",
+            font=("Arial", 10)
+        ).pack(anchor=tk.W, padx=5, pady=2)
+
+        # 显卡信息
+        gpu_frame = ttk.LabelFrame(
+            parent,
+            text="显卡 (GPU)",
+            padding=10
+        )
+        gpu_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(
+            gpu_frame,
+            text=f"品牌: {self.hardware_info['gpu']['brand']}",
+            font=("Arial", 10)
+        ).pack(anchor=tk.W, padx=5, pady=2)
+
+        ttk.Label(
+            gpu_frame,
+            text=f"型号: {self.hardware_info['gpu']['model']}",
+            font=("Arial", 10)
+        ).pack(anchor=tk.W, padx=5, pady=2)
+
+        ttk.Label(
+            gpu_frame,
+            text=f"显存: {self.hardware_info['gpu']['vram']}",
+            font=("Arial", 10)
+        ).pack(anchor=tk.W, padx=5, pady=2)
+
+        # 主板信息
+        mb_frame = ttk.LabelFrame(
+            parent,
+            text="主板 (Motherboard)",
+            padding=10
+        )
+        mb_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(
+            mb_frame,
+            text=f"品牌: {self.hardware_info['motherboard']['brand']}",
+            font=("Arial", 10)
+        ).pack(anchor=tk.W, padx=5, pady=2)
+
+        ttk.Label(
+            mb_frame,
+            text=f"型号: {self.hardware_info['motherboard']['model']}",
+            font=("Arial", 10)
+        ).pack(anchor=tk.W, padx=5, pady=2)
+
+        # 存储信息
+        storage_frame = ttk.LabelFrame(
+            parent,
+            text="存储设备",
+            padding=10
+        )
+        storage_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        if not self.hardware_info['storage']['disks']:
+            ttk.Label(
+                storage_frame,
+                text="未检测到存储设备",
+                font=("Arial", 10)
+            ).pack(anchor=tk.W, padx=5, pady=2)
+        else:
+            for i, disk in enumerate(self.hardware_info['storage']['disks']):
+                disk_label = ttk.Label(
+                    storage_frame,
+                    text=f"磁盘 {i + 1}: {disk['model']} ({disk['size']}, {disk['type']})",
+                    font=("Arial", 10)
+                )
+                disk_label.pack(anchor=tk.W, padx=5, pady=2)
+
+        # 显示器信息
+        display_frame = ttk.LabelFrame(
+            parent,
+            text="显示器",
+            padding=10
+        )
+        display_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(
+            display_frame,
+            text=f"型号: {self.hardware_info['display']['model']}",
+            font=("Arial", 10)
+        ).pack(anchor=tk.W, padx=5, pady=2)
+
+        ttk.Label(
+            display_frame,
+            text=f"尺寸: {self.hardware_info['display']['size']}",
+            font=("Arial", 10)
+        ).pack(anchor=tk.W, padx=5, pady=2)
+
+        ttk.Label(
+            display_frame,
+            text=f"分辨率: {self.hardware_info['display']['resolution']}",
+            font=("Arial", 10)
+        ).pack(anchor=tk.W, padx=5, pady=2)
 
     def get_cpu_info(self):
         """获取CPU信息，包括工艺制程和指令集"""
@@ -1059,44 +1349,290 @@ class CPUBenchmarkUI:
             self.root.after(1000, self.update_monitor_data)
 
         except Exception as e:
-            print(f"加载系统信息出错: {str(e)}")
-            self.root.after(100, lambda: self.system_info_label.config(text=f"获取系统信息出错: {str(e)}"))
+            error_msg = str(e)  # 保存错误信息
+            print(f"加载系统信息出错: {error_msg}")
+            # 使用局部变量避免作用域问题
+            self.root.after(100, lambda msg=error_msg: self.system_info_label.config(text=f"获取系统信息出错: {msg}"))
 
-    def update_system_info_display(self):
-        """更新系统信息显示"""
-        if not self.system_info_loaded:
-            return
+    def load_hardware_info(self):
+        """加载硬件信息（CPU、内存、显卡、主板、硬盘、显示器）"""
+        try:
+            # CPU信息
+            self.hardware_info['cpu']['model'] = self.cpu_brand
+            self.hardware_info['cpu']['cores'] = self.cpu_cores
+            self.hardware_info['cpu'][
+                'freq'] = f"{self.get_cpu_freq() / 1000:.2f} GHz" if self.get_cpu_freq() > 0 else "未知"
 
-        # 更新顶部信息栏
-        freq_display = f"{self.cpu_freq:.2f} GHz" if self.cpu_freq > 0 else "未知频率"
-        usage_display = f"{self.cpu_usage:.1f}%"
-        temp_display = self.temperature
-        power_display = self.power
-        info_text = (f"系统: {self.os_info} | "
-                     f"CPU: {self.cpu_brand} | "
-                     f"核心数: {self.cpu_cores} | "
-                     f"频率: {freq_display} | "
-                     f"使用率: {usage_display} | "
-                     f"温度: {temp_display} | "
-                     f"功耗: {power_display} | "
-                     f"电压: {self.voltage}V | "
-                     f"工艺: {self.cpu_process} | "
-                     f"内存: {self.mem_total}")
-        self.system_info_label.config(text=info_text)
+            # 内存信息
+            self.load_memory_info()
 
-        # 更新总得分标签页的CPU信息
-        cpu_details = (
-            f"CPU型号: {self.cpu_brand}\n"
-            f"核心/线程: {self.cpu_cores}\n"
-            f"工艺制程: {self.cpu_process}\n"
-            f"指令集: {self.cpu_instruction_set}\n"
-            f"当前频率: {freq_display}\n"
-            f"当前使用率: {usage_display}\n"
-            f"当前温度: {temp_display}\n"
-            f"当前功耗: {power_display}\n"
-            f"当前电压: {self.voltage}V"
-        )
-        self.cpu_info_label.config(text=cpu_details)
+            # 显卡信息
+            self.load_gpu_info()
+
+            # 主板信息
+            self.load_motherboard_info()
+
+            # 存储设备信息
+            self.load_storage_info()
+
+            # 显示器信息
+            self.load_display_info()
+
+        except Exception as e:
+            print(f"加载硬件信息出错: {str(e)}")
+
+    def load_memory_info(self):
+        """加载内存信息"""
+        try:
+            if platform.system() == "Windows":
+                # 使用WMI获取内存信息
+                c = wmi.WMI()
+                total_memory = 0
+                memory_modules = []
+
+                # 获取物理内存信息
+                for mem in c.Win32_PhysicalMemory():
+                    capacity_gb = int(mem.Capacity) / (1024 ** 3)
+                    total_memory += capacity_gb
+
+                    # 获取内存品牌和类型
+                    brand = mem.Manufacturer or "未知品牌"
+                    memory_type = "未知类型"
+
+                    # 根据内存类型代码判断
+                    if mem.MemoryType == 20:  # DDR
+                        memory_type = "DDR"
+                    elif mem.MemoryType == 21:  # DDR2
+                        memory_type = "DDR2"
+                    elif mem.MemoryType == 24:  # DDR3
+                        memory_type = "DDR3"
+                    elif mem.MemoryType == 26:  # DDR4
+                        memory_type = "DDR4"
+                    elif mem.MemoryType == 34:  # DDR5
+                        memory_type = "DDR5"
+
+                    memory_modules.append({
+                        "size": f"{capacity_gb:.1f} GB",
+                        "brand": brand,
+                        "type": memory_type
+                    })
+
+                # 如果有多个内存模块，只显示第一个的品牌
+                if memory_modules:
+                    self.hardware_info['memory']['brand'] = memory_modules[0]['brand']
+                    self.hardware_info['memory']['size'] = f"{total_memory:.1f} GB"
+                    self.hardware_info['memory']['type'] = memory_modules[0]['type']
+                else:
+                    self.hardware_info['memory']['size'] = self.mem_total
+                    self.hardware_info['memory']['brand'] = "未知品牌"
+                    self.hardware_info['memory']['type'] = "未知类型"
+            else:
+                # Linux/macOS - 简化处理
+                mem = psutil.virtual_memory()
+                self.hardware_info['memory']['size'] = f"{mem.total / (1024 ** 3):.1f} GB"
+                self.hardware_info['memory']['brand'] = "未知品牌"
+                self.hardware_info['memory']['type'] = "未知类型"
+
+        except Exception as e:
+            print(f"加载内存信息出错: {str(e)}")
+            self.hardware_info['memory']['size'] = self.mem_total
+            self.hardware_info['memory']['brand'] = "未知品牌"
+            self.hardware_info['memory']['type'] = "未知类型"
+
+    def load_gpu_info(self):
+        """加载显卡信息"""
+        try:
+            if platform.system() == "Windows":
+                # 使用WMI获取显卡信息
+                c = wmi.WMI()
+                gpus = c.Win32_VideoController()
+
+                if gpus:
+                    # 只取第一个显卡
+                    gpu = gpus[0]
+                    gpu_name = gpu.Name or "未知显卡"
+                    vram = "未知"
+
+                    # 尝试获取显存大小
+                    if hasattr(gpu, 'AdapterRAM'):
+                        vram_mb = int(gpu.AdapterRAM) / (1024 ** 2)
+                        vram = f"{vram_mb:.0f} MB"
+                    elif hasattr(gpu, 'VideoMemoryType') and hasattr(gpu, 'AdapterRAM'):
+                        # 某些系统可能需要特殊处理
+                        vram = f"{int(gpu.AdapterRAM) / (1024 ** 2):.0f} MB"
+
+                    # 判断显卡品牌
+                    gpu_brand = "未知品牌"
+                    if "NVIDIA" in gpu_name.upper():
+                        gpu_brand = "NVIDIA"
+                    elif "AMD" in gpu_name.upper() or "RADEON" in gpu_name.upper():
+                        gpu_brand = "AMD"
+                    elif "INTEL" in gpu_name.upper():
+                        gpu_brand = "Intel"
+
+                    self.hardware_info['gpu']['brand'] = gpu_brand
+                    self.hardware_info['gpu']['model'] = gpu_name
+                    self.hardware_info['gpu']['vram'] = vram
+                else:
+                    self.hardware_info['gpu']['brand'] = "未知品牌"
+                    self.hardware_info['gpu']['model'] = "未知显卡"
+                    self.hardware_info['gpu']['vram'] = "未知"
+            else:
+                # Linux/macOS - 简化处理
+                self.hardware_info['gpu']['brand'] = "未知品牌"
+                self.hardware_info['gpu']['model'] = "未知显卡"
+                self.hardware_info['gpu']['vram'] = "未知"
+
+        except Exception as e:
+            print(f"加载显卡信息出错: {str(e)}")
+            self.hardware_info['gpu']['brand'] = "未知品牌"
+            self.hardware_info['gpu']['model'] = "未知显卡"
+            self.hardware_info['gpu']['vram'] = "未知"
+
+    def load_motherboard_info(self):
+        """加载主板信息"""
+        try:
+            if platform.system() == "Windows":
+                # 使用WMI获取主板信息
+                c = wmi.WMI()
+                boards = c.Win32_BaseBoard()
+
+                if boards:
+                    board = boards[0]
+                    manufacturer = board.Manufacturer or "未知制造商"
+                    product = board.Product or "未知型号"
+
+                    self.hardware_info['motherboard']['brand'] = manufacturer
+                    self.hardware_info['motherboard']['model'] = product
+                else:
+                    self.hardware_info['motherboard']['brand'] = "未知制造商"
+                    self.hardware_info['motherboard']['model'] = "未知型号"
+            else:
+                # Linux/macOS - 简化处理
+                self.hardware_info['motherboard']['brand'] = "未知制造商"
+                self.hardware_info['motherboard']['model'] = "未知型号"
+
+        except Exception as e:
+            print(f"加载主板信息出错: {str(e)}")
+            self.hardware_info['motherboard']['brand'] = "未知制造商"
+            self.hardware_info['motherboard']['model'] = "未知型号"
+
+    def load_storage_info(self):
+        """加载存储设备信息"""
+        try:
+            if platform.system() == "Windows":
+                # 使用WMI获取磁盘信息
+                c = wmi.WMI()
+                disks = c.Win32_DiskDrive()
+
+                self.hardware_info['storage']['disks'] = []
+
+                for disk in disks:
+                    model = disk.Model or "未知磁盘"
+                    size_gb = int(disk.Size) / (1024 ** 3) if disk.Size else 0
+                    disk_type = "HDD"  # 默认假设为机械硬盘
+
+                    # 根据型号判断磁盘类型
+                    if "SSD" in model.upper() or "SOLID" in model.upper():
+                        disk_type = "SSD"
+                    elif "NVME" in model.upper():
+                        disk_type = "NVMe SSD"
+
+                    self.hardware_info['storage']['disks'].append({
+                        "model": model,
+                        "size": f"{size_gb:.1f} GB",
+                        "type": disk_type
+                    })
+
+                # 如果没有找到磁盘，添加一个未知条目
+                if not self.hardware_info['storage']['disks']:
+                    self.hardware_info['storage']['disks'].append({
+                        "model": "未知磁盘",
+                        "size": "未知",
+                        "type": "未知"
+                    })
+            else:
+                # Linux/macOS - 简化处理
+                # 获取分区信息
+                partitions = psutil.disk_partitions()
+                disk_info = []
+
+                for partition in partitions:
+                    try:
+                        usage = psutil.disk_usage(partition.mountpoint)
+                        disk_info.append({
+                            "model": partition.device,
+                            "size": f"{usage.total / (1024 ** 3):.1f} GB",
+                            "type": "未知"
+                        })
+                    except:
+                        continue
+
+                if disk_info:
+                    self.hardware_info['storage']['disks'] = disk_info
+                else:
+                    self.hardware_info['storage']['disks'].append({
+                        "model": "未知磁盘",
+                        "size": "未知",
+                        "type": "未知"
+                    })
+
+        except Exception as e:
+            print(f"加载存储设备信息出错: {str(e)}")
+            self.hardware_info['storage']['disks'] = [{
+                "model": "未知磁盘",
+                "size": "未知",
+                "type": "未知"
+            }]
+
+    def load_display_info(self):
+        """加载显示器信息"""
+        try:
+            # 尝试导入screeninfo
+            try:
+                import screeninfo
+                monitors = screeninfo.get_monitors()
+            except ImportError:
+                monitors = []
+                print("警告：未安装 screeninfo 模块，显示器信息将无法获取")
+            except:
+                monitors = []
+
+            if monitors:
+                # 只取主显示器
+                primary_monitor = None
+                for monitor in monitors:
+                    if monitor.is_primary:
+                        primary_monitor = monitor
+                        break
+                if not primary_monitor:
+                    primary_monitor = monitors[0]
+
+                # 获取显示器尺寸
+                width_cm = primary_monitor.width_mm / 10 if primary_monitor.width_mm else "未知"
+                height_cm = primary_monitor.height_mm / 10 if primary_monitor.height_mm else "未知"
+                size_inch = "未知"
+
+                # 计算对角线尺寸（英寸）
+                if primary_monitor.width_mm and primary_monitor.height_mm:
+                    diagonal_cm = math.sqrt(primary_monitor.width_mm ** 2 + primary_monitor.height_mm ** 2) / 10
+                    size_inch = diagonal_cm / 2.54
+
+                # 设置显示器信息
+                self.hardware_info['display'][
+                    'model'] = f"显示器 {primary_monitor.name}" if primary_monitor.name else "未知型号"
+                self.hardware_info['display']['size'] = f"{size_inch:.1f}\"" if isinstance(size_inch, float) else "未知"
+                self.hardware_info['display']['resolution'] = f"{primary_monitor.width} x {primary_monitor.height}"
+            else:
+                self.hardware_info['display']['model'] = "未知型号"
+                self.hardware_info['display']['size'] = "未知"
+                self.hardware_info['display']['resolution'] = "未知"
+
+        except Exception as e:
+            print(f"加载显示器信息出错: {str(e)}")
+            self.hardware_info['display']['model'] = "未知型号"
+            self.hardware_info['display']['size'] = "未知"
+            self.hardware_info['display']['resolution'] = "未知"
 
     def get_cpu_temp(self):
         """获取CPU温度"""
@@ -1159,6 +1695,10 @@ class CPUBenchmarkUI:
     def update_monitor_data(self):
         """更新监控数据（电压、频率、使用率、温度、功耗）"""
         try:
+            # 如果正在关闭程序，不再更新
+            if self.is_closing:
+                return
+
             # 获取当前频率
             current_freq = self.get_cpu_freq()
 
@@ -1278,9 +1818,19 @@ class CPUBenchmarkUI:
                 self.temp_history.append(temp_value)
                 self.power_history.append(power_value)
 
-                # 如果监控图表已初始化，更新图表
+                # 更新数据面板
                 if self.monitor_initialized:
+                    self.data_values["电压"].config(text=f"{voltage_value:.3f}")
+                    self.data_values["频率"].config(text=f"{current_freq:.2f}")
+                    self.data_values["使用率"].config(text=f"{self.cpu_usage:.1f}")
+                    self.data_values["温度"].config(text=f"{temp_value:.1f}")
+                    self.data_values["功耗"].config(text=f"{power_value:.1f}")
+
+                # 限制图表更新频率 - 每5秒更新一次图表
+                current_time = time.time()
+                if self.monitor_initialized and (current_time - self.last_plot_time) >= self.plot_interval:
                     self.plot_monitor()
+                    self.last_plot_time = current_time
 
         except Exception as e:
             print(f"监控数据更新错误: {str(e)}")
@@ -1293,27 +1843,16 @@ class CPUBenchmarkUI:
             self.root.after(0, self.update_system_info_display)
 
         # 安排下一次更新
-        self.root.after(self.monitor_update_interval, self.update_monitor_data)
+        if not self.is_closing:
+            self.monitor_after_id = self.root.after(self.monitor_update_interval, self.update_monitor_data)
 
     def plot_monitor(self):
-        """绘制监控图表"""
-        if not self.monitor_initialized or not self.timestamps:
+        """绘制监控图表 - 优化性能版"""
+        if not self.monitor_initialized or not self.timestamps or self.is_closing:
             return
 
         # 准备时间标签
         time_labels = [ts.strftime("%H:%M:%S") for ts in self.timestamps]
-
-        # 更新数据面板
-        if self.voltage != "N/A":
-            self.data_values["电压"].config(text=f"{float(self.voltage):.3f}")
-        if self.freq_history:
-            self.data_values["频率"].config(text=f"{self.freq_history[-1]:.2f}")
-        if self.usage_history:
-            self.data_values["使用率"].config(text=f"{self.usage_history[-1]:.1f}")
-        if self.temperature != "N/A":
-            self.data_values["温度"].config(text=f"{float(self.temperature.split('°')[0]):.1f}")
-        if self.power != "N/A":
-            self.data_values["功耗"].config(text=f"{float(self.power.split('W')[0]):.1f}")
 
         # 更新监控图表
         self.monitor_ax.clear()
@@ -1325,7 +1864,12 @@ class CPUBenchmarkUI:
                                              label=f"电压")
         self.monitor_ax.set_ylabel('电压 (V)', color=voltage_color, fontsize=9)
         self.monitor_ax.tick_params(axis='y', labelcolor=voltage_color)
-        self.monitor_ax.set_ylim(min(self.voltage_history) * 0.95, max(self.voltage_history) * 1.05)
+
+        # 设置Y轴范围（避免空数据）
+        if self.voltage_history:
+            min_voltage = min(self.voltage_history) * 0.95
+            max_voltage = max(self.voltage_history) * 1.05
+            self.monitor_ax.set_ylim(min_voltage, max_voltage)
 
         # 创建第二个Y轴用于频率
         ax2 = self.monitor_ax.twinx()
@@ -1335,7 +1879,12 @@ class CPUBenchmarkUI:
                               label=f"频率")
         ax2.set_ylabel('频率 (MHz)', color=freq_color, fontsize=9)
         ax2.tick_params(axis='y', labelcolor=freq_color)
-        ax2.set_ylim(min(self.freq_history) * 0.95, max(self.freq_history) * 1.05)
+
+        # 设置Y轴范围（避免空数据）
+        if self.freq_history:
+            min_freq = min(self.freq_history) * 0.95
+            max_freq = max(self.freq_history) * 1.05
+            ax2.set_ylim(min_freq, max_freq)
 
         # 创建第三个Y轴用于使用率
         ax3 = self.monitor_ax.twinx()
@@ -1370,11 +1919,14 @@ class CPUBenchmarkUI:
         self.monitor_figure.tight_layout()
         self.monitor_figure.subplots_adjust(bottom=0.25)  # 为图例留出空间
 
-        # 更新画布
-        self.monitor_canvas.draw()
+        # 更新画布 - 使用draw_idle减少CPU占用
+        self.monitor_canvas.draw_idle()
 
     def on_tab_changed(self, event):
         """处理标签页切换事件"""
+        if self.is_closing:
+            return
+
         selected_tab = self.tab_control.select()
         tab_text = self.tab_control.tab(selected_tab, "text")
 
@@ -1386,9 +1938,13 @@ class CPUBenchmarkUI:
         elif tab_text == "实时监控" and not self.monitor_initialized:
             self.initialize_monitor()
 
+        # 当首次切换到电脑配置标签页时初始化硬件信息
+        elif tab_text == "电脑配置" and not self.hardware_info_initialized:
+            self.initialize_hardware_info()
+
     def start_benchmark_thread(self):
         """在单独的线程中运行基准测试"""
-        if self.running:
+        if self.running or self.is_closing:
             return
 
         self.running = True
@@ -1423,7 +1979,7 @@ class CPUBenchmarkUI:
             self.root.update_idletasks()
 
             # 预热测试
-            if not self.cancel_requested:
+            if not self.cancel_requested and not self.is_closing:
                 self.update_progress("预热CPU...", 0)
                 self.warmup_test()
 
@@ -1440,7 +1996,7 @@ class CPUBenchmarkUI:
 
             # 运行各项测试
             for i, (test_name, test_func) in enumerate(tests):
-                if self.cancel_requested:
+                if self.cancel_requested or self.is_closing:
                     break
 
                 progress = int((i / len(tests)) * 100)
@@ -1448,7 +2004,7 @@ class CPUBenchmarkUI:
 
                 # 运行测试并获取结果
                 score, details, grade = test_func()
-                if self.cancel_requested:
+                if self.cancel_requested or self.is_closing:
                     break
 
                 self.results[test_name] = {"score": score, "details": details, "grade": grade}
@@ -1459,7 +2015,7 @@ class CPUBenchmarkUI:
                 if i % 2 == 0:  # 减少UI更新频率
                     self.root.update_idletasks()
 
-            if not self.cancel_requested and self.results:
+            if not self.cancel_requested and not self.is_closing and self.results:
                 # 计算总得分
                 total_score = self.calculate_total_score()
 
@@ -1482,19 +2038,24 @@ class CPUBenchmarkUI:
                 self.tab_control.select(0)
 
         except Exception as e:
-            self.status_var.set(f"测试出错: {str(e)}")
-            messagebox.showerror("错误", f"测试过程中发生错误:\n{str(e)}")
+            if not self.is_closing:  # 仅在未关闭时显示错误
+                self.status_var.set(f"测试出错: {str(e)}")
+                messagebox.showerror("错误", f"测试过程中发生错误:\n{str(e)}")
         finally:
             self.running = False
-            self.run_button.config(state=tk.NORMAL)
-            self.cancel_button.config(state=tk.DISABLED)
-            self.progress_label.config(text="就绪")
-            self.monitoring_active = True  # 测试结束后恢复监控
-            self.monitor_button.config(text="暂停监控")
-            self.root.update_idletasks()
+            if not self.is_closing:  # 仅在未关闭时更新UI
+                self.run_button.config(state=tk.NORMAL)
+                self.cancel_button.config(state=tk.DISABLED)
+                self.progress_label.config(text="就绪")
+                self.monitoring_active = True  # 测试结束后恢复监控
+                self.monitor_button.config(text="暂停监控")
+                self.root.update_idletasks()
 
     def update_progress(self, message, value):
         """更新进度显示"""
+        if self.is_closing:
+            return
+
         self.progress_var.set(value)
         self.progress_label.config(text=message)
         self.status_var.set(message)
@@ -1513,7 +2074,7 @@ class CPUBenchmarkUI:
         for i in range(1, iterations + 1):
             result += math.sqrt(i) * math.sin(i) / (math.cos(i) or 1.0)
             result += (i * 3) // 2 + (i % 7)
-            if self.cancel_requested:
+            if self.cancel_requested or self.is_closing:
                 return
             # 减少UI更新频率
             if i % 100000 == 0:
@@ -1541,7 +2102,7 @@ class CPUBenchmarkUI:
             result += fp_val + int_val
 
             # 定期检查取消请求
-            if self.cancel_requested and i % 1000000 == 0:
+            if (self.cancel_requested or self.is_closing) and i % 1000000 == 0:
                 return 0, "测试已取消", "N/A"
 
         elapsed = time.time() - start_time
@@ -1565,7 +2126,7 @@ class CPUBenchmarkUI:
         result = 0.0
         for i in range(1, iterations + 1):
             result += math.sqrt(i) * math.sin(i) / (math.cos(i) + 0.1)
-            if self.cancel_requested and i % 500000 == 0:
+            if (self.cancel_requested or self.is_closing) and i % 500000 == 0:
                 return 0, "测试已取消", "N/A"
 
         elapsed = time.time() - start_time
@@ -1594,7 +2155,7 @@ class CPUBenchmarkUI:
                 result -= (i * 2) // 3
 
             # 减少检查频率
-            if self.cancel_requested and i % 1000000 == 0:
+            if (self.cancel_requested or self.is_closing) and i % 1000000 == 0:
                 return 0, "测试已取消", "N/A"
 
         elapsed = time.time() - start_time
@@ -1615,14 +2176,14 @@ class CPUBenchmarkUI:
         arr = [random.random() for _ in range(size)]
         iterations = 25  # 增加迭代次数
 
-        if self.cancel_requested:
+        if self.cancel_requested or self.is_closing:
             return 0, "测试已取消", "N/A"
 
         # 读取测试
         start_time = time.time()
         for idx in range(iterations):
             sum(arr)  # 更高效的求和
-            if self.cancel_requested:
+            if self.cancel_requested or self.is_closing:
                 return 0, "测试已取消", "N/A"
 
         read_elapsed = time.time() - start_time
@@ -1632,7 +2193,7 @@ class CPUBenchmarkUI:
         for idx in range(iterations):
             # 使用更高效的写入方式
             arr = [random.random() for _ in range(size)]
-            if self.cancel_requested:
+            if self.cancel_requested or self.is_closing:
                 return 0, "测试已取消", "N/A"
 
         write_elapsed = time.time() - start_time
@@ -1669,7 +2230,7 @@ class CPUBenchmarkUI:
             result += val & 0xFFFF
 
             # 减少检查频率
-            if self.cancel_requested and i % 500000 == 0:
+            if (self.cancel_requested or self.is_closing) and i % 500000 == 0:
                 return 0, "测试已取消", "N/A"
 
         elapsed = time.time() - start_time
@@ -1697,7 +2258,7 @@ class CPUBenchmarkUI:
             result = (result + count) & 0xFF
 
             # 减少检查频率
-            if self.cancel_requested and i % 500000 == 0:
+            if (self.cancel_requested or self.is_closing) and i % 500000 == 0:
                 return 0, "测试已取消", "N/A"
 
         elapsed = time.time() - start_time
@@ -1723,7 +2284,7 @@ class CPUBenchmarkUI:
         cancel_flag = manager.Value('b', False)
 
         for cores in range(1, max_cores + 1):
-            if self.cancel_requested:
+            if self.cancel_requested or self.is_closing:
                 cancel_flag.value = True
                 break
 
@@ -2085,8 +2646,8 @@ class CPUBenchmarkUI:
             messagebox.showerror("保存错误", f"保存结果时出错:\n{str(e)}")
 
     def plot_results(self):
-        """绘制性能图表"""
-        if not self.results or not self.chart_initialized:
+        """绘制性能图表 - 优化性能版"""
+        if not self.results or not self.chart_initialized or self.is_closing:
             # 如果图表未初始化，尝试初始化
             if not self.chart_initialized:
                 self.initialize_chart()
@@ -2135,8 +2696,44 @@ class CPUBenchmarkUI:
         # 调整布局
         self.figure.tight_layout()
 
-        # 更新画布
-        self.canvas.draw()
+        # 更新画布 - 使用draw_idle减少CPU占用
+        self.canvas.draw_idle()
+
+    def update_system_info_display(self):
+        """更新系统信息显示"""
+        if not self.system_info_loaded:
+            return
+
+        # 更新顶部信息栏
+        freq_display = f"{self.cpu_freq:.2f} GHz" if self.cpu_freq > 0 else "未知频率"
+        usage_display = f"{self.cpu_usage:.1f}%"
+        temp_display = self.temperature
+        power_display = self.power
+        info_text = (f"系统: {self.os_info} | "
+                     f"CPU: {self.cpu_brand} | "
+                     f"核心数: {self.cpu_cores} | "
+                     f"频率: {freq_display} | "
+                     f"使用率: {usage_display} | "
+                     f"温度: {temp_display} | "
+                     f"功耗: {power_display} | "
+                     f"电压: {self.voltage}V | "
+                     f"工艺: {self.cpu_process} | "
+                     f"内存: {self.mem_total}")
+        self.system_info_label.config(text=info_text)
+
+        # 更新总得分标签页的CPU信息
+        cpu_details = (
+            f"CPU型号: {self.cpu_brand}\n"
+            f"核心/线程: {self.cpu_cores}\n"
+            f"工艺制程: {self.cpu_process}\n"
+            f"指令集: {self.cpu_instruction_set}\n"
+            f"当前频率: {freq_display}\n"
+            f"当前使用率: {usage_display}\n"
+            f"当前温度: {temp_display}\n"
+            f"当前功耗: {power_display}\n"
+            f"当前电压: {self.voltage}V"
+        )
+        self.cpu_info_label.config(text=cpu_details)
 
 
 # 主函数

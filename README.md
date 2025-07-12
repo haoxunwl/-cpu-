@@ -12,6 +12,11 @@
 github开源地址：https://github.com/haoxunwl/-cpu-/tree/main
 本程序采用python开发，采用MIT开源协议，可二次开发，欢迎大家在基于本程序上开发各种有意思好用好玩的功能！
 
+打包好并写好签名的版本：
+通过网盘分享的文件：浩讯亿通cpu测试工具.zip
+链接: https://pan.baidu.com/s/1Odm9VxiOXNjEX0--jScgLA?pwd=hxyt 提取码: hxyt 复制这段内容后打开百度网盘手机App，操作更方便哦
+下载就可以直接使用！！！
+
 程序截图：
 <img width="803" height="763" alt="屏幕截图 2025-07-12 172919" src="https://github.com/user-attachments/assets/3b675042-3f7e-4f92-a708-88ea88baf6d4" />
 <img width="800" height="761" alt="屏幕截图 2025-07-12 172805" src="https://github.com/user-attachments/assets/05d4c25d-f329-4628-b62e-43a0ae85e902" />
